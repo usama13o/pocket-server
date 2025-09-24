@@ -133,11 +133,18 @@ All WebSocket messages follow this envelope structure:
 
 ### Authentication Flow
 
-1. **Pairing** (local-only):
-   ```
-   POST /auth/pair { pin: "1234" }
-   → { deviceId, secret }
-   ```
+1. **Pairing**:
+   - Local (default):
+     ```
+     POST /auth/pair { deviceId, pin }
+     → { deviceId, secret }
+     ```
+   - Remote (optional, requires one-time token):
+     ```
+     # Start with: pocket-server pair --remote
+     POST /auth/pair { deviceId, pin, pairToken }
+     → { deviceId, secret }
+     ```
 
 2. **Token Generation**:
    ```
@@ -274,6 +281,9 @@ pocket-server pair
 
 # Custom duration and PIN
 pocket-server pair --duration=120000 --pin=9999
+
+# Remote pairing (PIN + one-time token)
+pocket-server pair --remote
 ```
 
 ### Maintenance

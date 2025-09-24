@@ -16,8 +16,8 @@ Core OS capabilities
 - Repo search: quick search and telescopic fuzzy search across code
 - Background/cloud agents: launch autonomous coding jobs on VMs from GitHub repos; monitor, review diffs, and approve PRs
 - Notifications: opt‑in device notifications for task updates
-- Security model: local‑only PIN pairing; short‑lived tokens for HTTP/WS
-- Remote access: optional Cloudflare tunnel (`pocket-server start --remote`)
+- Security model: PIN pairing (local by default), optional remote pairing with one‑time token; short‑lived tokens for HTTP/WS
+- Remote access: optional Cloudflare tunnel (`pocket-server start --remote`); remote pairing via `pocket-server pair --remote`
 - Versioned releases: macOS (arm64, x64) and Linux (x64), with bundled Node v22.18.0
 
 Mission
@@ -49,6 +49,9 @@ Quick start from your terminal
 # 1) Pair your phone to this machine (PIN shows in the terminal)
 pocket-server pair
 
+# or enable remote pairing (PIN + token; prints public URL if available)
+pocket-server pair --remote
+
 # 2) Start locally (default port 3000)
 pocket-server start
 
@@ -71,7 +74,7 @@ Use it with the Pocket mobile app
    - Website: https://www.pocket-agent.xyz
 3. Pair this device → Enter the 6‑digit PIN from `pocket-server pair`
 4. Start the server (`pocket-server start`), then connect from the app
-5. For remote access, run `pocket-server start --remote` and paste the public URL in the app
+5. For remote access, run `pocket-server start --remote` and paste the public URL in the app. To pair over the internet, run `pocket-server pair --remote` and enter URL + PIN + Token in the app.
 
 
 Mobile working directory selection
@@ -103,7 +106,7 @@ pocket-server <command> [flags]
 
 Commands
   start        Start the server
-  pair         Start the server and open pairing window
+  pair         Start the server and open pairing window (supports --remote)
   stop         Stop a running server
   update       Update to the latest release via installer
   terminal     Terminal utilities (sessions, attach, select)
@@ -111,7 +114,7 @@ Commands
 
 Flags
   --port, -p <n>        Port to listen on (default: 3000 or $PORT)
-  --remote, -r          Start Cloudflare tunnel for remote access
+  --remote, -r          Start Cloudflare tunnel for remote access (start) or enable remote pairing (pair)
   --no-auto-update      Skip pre-start update check
   --duration <ms>       Pairing window duration (pair only; default: 60000)
   --pin <code>          Override generated PIN (pair only)
@@ -156,10 +159,12 @@ Notes
 - Session titles come from the mobile tabs; you can long‑press to rename on mobile and they’ll appear here.
 - Voice dictation on mobile: the Terminal screen supports speech‑to‑text and streams text as normal input to the PTY.
 
-How the OS works
-----------------
+Auth & connection model
+-----------------------
 
-- Pairing (local‑only): your phone pairs over LAN to obtain a device secret
+- Pairing:
+  - Local (default): your phone pairs over LAN using a time‑boxed PIN to obtain a device secret
+  - Remote (optional): enable with `pocket-server pair --remote`; pair using URL + PIN + one‑time token (short TTL, limited attempts)
 - Auth tokens: short‑lived access tokens are derived from the device secret; HTTP uses `Authorization: Pocket <token>`, WS connects with `?token=...` (invalid tokens close with 4401)
 - Server‑authoritative: sessions and messages live on the server under `~/.pocket-server/data/`
 - Event stream: UI subscribes to events; no client‑side shared state
@@ -173,7 +178,8 @@ Troubleshooting
   - Try `pocket-server start --port 3010` and connect to that port
 
 - Pairing fails
-  - Pairing only works on local network for security; remote pairing is disabled
+  - Ensure pairing window is active (`pocket-server pair` or `pocket-server pair --remote`)
+  - For remote pairing, you must enter URL + PIN + Token exactly as shown
   - Keep the terminal with `pocket-server pair` open until you finish pairing
 
 - Remote URL stops working
@@ -230,7 +236,7 @@ Project context (CLAUDE.md / AGENTS.md)
 Security notes
 --------------
 
-- Pairing is local‑only; tokens are short‑lived and required for HTTP/WS
+- Pairing defaults to local‑only; remote pairing is available via `pair --remote` and requires PIN + one‑time token
 - The mobile app never stores server conversations; the server is authoritative
 - Releases bundle Node v22.18.0 for consistency across platforms
 

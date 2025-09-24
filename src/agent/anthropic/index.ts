@@ -37,6 +37,17 @@ export async function handleAgentWebSocket(
   
   // Extract API key from message or use environment variable
   const apiKey = message.apiKey || process.env.ANTHROPIC_API_KEY;
+  try {
+    console.log(
+      JSON.stringify({
+        at: 'ws_message_received',
+        provider: 'anthropic',
+        clientId,
+        sessionId: clientMessage?.sessionId,
+        type: clientMessage?.type
+      })
+    );
+  } catch {}
   
   if (!apiKey) {
     const errorMessage: ServerMessage = {
@@ -77,6 +88,19 @@ export async function handleAgentWebSocket(
       ts: new Date().toISOString(),
       seq: sessionStoreFs.nextSeq(sid),
     } as any;
+    try {
+      console.log(
+        JSON.stringify({
+          at: 'ws_message_send',
+          provider: 'anthropic',
+          sessionId: sid,
+          type: msg?.type,
+          seq: envelope.seq,
+          turnId: (msg as any)?.turnId,
+          event: (msg as any)?.event
+        })
+      );
+    } catch {}
     ws.send(JSON.stringify({ ...envelope, ...msg }));
   };
 
@@ -227,7 +251,21 @@ async function handleGetSessionSnapshot(req: Request): Promise<Response> {
       headers: { 'Content-Type': 'application/json' }
     });
   }
-  return new Response(JSON.stringify(snapshot), {
+  // Merge runtime activeTurn from either provider service if present
+  let activeTurn: any = undefined;
+  try {
+    const rtA = (await import('./anthropic.js')).anthropicService.getSnapshot(sessionId) as any;
+    if (rtA && (rtA as any).activeTurn) activeTurn = (rtA as any).activeTurn;
+  } catch {}
+  try {
+    const rtO = (await import('../openai/service.js')).openAIService as any;
+    if (!activeTurn && typeof rtO.peekActiveTurn === 'function') {
+      const t = rtO.peekActiveTurn(sessionId);
+      if (t) activeTurn = t;
+    }
+  } catch {}
+  const merged = { ...snapshot, ...(activeTurn ? { activeTurn } : {}) };
+  return new Response(JSON.stringify(merged), {
     headers: { 'Content-Type': 'application/json' }
   });
 }

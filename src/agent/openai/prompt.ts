@@ -99,6 +99,7 @@ export function generateSystemPromptOpenAI(params: SystemPromptParamsOpenAI): st
 - Before starting a new major subtask, call work_plan.revise if the plan needs reordering or additional items.
 - Immediately after finishing a step, call work_plan.complete so the UI reflects progress.
 - When analysis reveals new required work, add items via work_plan.revise; do not proceed without updating the plan.
+- Single plan rule: There is exactly one work plan per session. If a plan already exists, do not call work_plan.create again—use work_plan.revise to modify and work_plan.complete to mark progress. Reuse stable step ids; never fork or duplicate plans.
 
 ### Examples (Parameters JSON)
 - work_plan.create

@@ -43,7 +43,8 @@ export type ContentBlock =
   | ToolResultBlock
   | ServerToolUseBlock
   | WebSearchToolResultBlock
-  | ThinkingBlock;
+  | ThinkingBlock
+  | ImageContentBlock;
 
 export interface TextBlock {
   type: 'text';
@@ -55,7 +56,7 @@ export interface ToolUseBlock {
   type: 'tool_use';
   id: string;
   name: string;
-  input: Record<string, any>;
+  input: Record<string, unknown>;
 }
 
 export interface ToolResultBlock {
@@ -63,6 +64,14 @@ export interface ToolResultBlock {
   tool_use_id: string;
   content: string | ContentBlock[];
   is_error?: boolean;
+}
+
+export interface ImageContentBlock {
+  type: 'image';
+  source:
+    | { type: 'base64'; media_type: string; data: string }
+    | { type: 'url'; url: string };
+  dimension?: { height?: number; width?: number } | null;
 }
 
 export interface ServerToolUseBlock {
@@ -83,6 +92,32 @@ export interface ThinkingBlock {
   thinking: string;
   signature?: string;
   duration_ms?: number;
+}
+
+// ============================================
+// Turn Model (server-authoritative turn lifecycle)
+// ============================================
+
+export type TurnPhase =
+  | 'accepted'
+  | 'queued'
+  | 'starting'
+  | 'planning'
+  | 'awaiting_tool'
+  | 'tool_running'
+  | 'streaming'
+  | 'completed'
+  | 'error'
+  | 'stopped';
+
+export interface Turn {
+  id: string;
+  sessionId: string;
+  anchorIndex: number; // index of the user message in conversation.messages this turn is anchored to
+  phase: TurnPhase;
+  startedAt: string; // ISO
+  endedAt?: string; // ISO
+  lastDurationMs?: number;
 }
 
 // ============================================
@@ -183,7 +218,7 @@ export interface SignatureDelta {
 export interface Tool {
   name: string;
   description: string;
-  input_schema: Record<string, any>;
+  input_schema: Record<string, unknown>;
 }
 
 export interface SpecialTool {
@@ -355,6 +390,8 @@ export interface MessageParam {
   cache_control?: CacheControl;
 }
 
+export type MessageContent = MessageParam['content'];
+
 export interface ToolChoice {
   type: 'auto' | 'any' | 'tool' | 'none';
   name?: string;
@@ -432,6 +469,7 @@ export interface AgentSession {
     path: string;
     content: string;
   };
+  activeTurn?: Turn; // current or last turn info
 }
 
 export interface StreamingState {
@@ -460,6 +498,7 @@ export interface SessionSnapshot {
   pendingTools: ToolRequest[];
   conversation: { messages: MessageParam[] };
   streamingState: StreamingState;
+  activeTurn?: Turn; // optional active/last turn for quick UI state rebuild
 }
 
 // ============================================
@@ -469,7 +508,7 @@ export interface SessionSnapshot {
 export interface ClientMessage {
   type: 'agent:message' | 'agent:tool_response' | 'agent:generate_title' | 'agent:stop';
   sessionId: string;
-  content?: string;
+  content?: MessageContent;
   workingDir?: string;
   maxMode?: boolean;
   chatMode?: boolean; // New field: true = require approval, false = auto-execute safe tools
@@ -491,7 +530,8 @@ export interface ServerMessage {
     | 'agent:session_started'
     | 'agent:stream_event'
     | 'agent:stream_complete'
-    | 'agent:status';
+    | 'agent:status'
+    | 'agent:turn'; // turn lifecycle events
   sessionId: string;
   content?: string;
   toolRequest?: ToolRequest;
@@ -509,14 +549,21 @@ export interface ServerMessage {
   streamEvent?: StreamEvent;  // Direct Anthropic SDK event
   finalMessage?: Message;      // Final complete message from stream
   phase?: AgentPhase;          // For agent:status updates
-  isComplete?: boolean;  // For agent:assistant messages
+  turnId?: string;             // Optional: correlate status with active turn
+  event?: 'created' | 'phase' | 'done'; // For agent:turn
+  turn?: Turn;                 // Turn payload
+  isComplete?: boolean;
 }
 
 export interface ToolRequest {
   id: string;
   name: string;  // Anthropic tool name (e.g., 'bash', 'str_replace_based_edit_tool', 'web_search')
-  input: any;
+  input: unknown;
   description?: string;
+  approved?: boolean;
+  responseId?: string;
+  output?: string;
+  isError?: boolean;
 }
 
 export interface ToolOutput {
@@ -525,5 +572,5 @@ export interface ToolOutput {
   name: string;  // The tool that generated this output
   output: string;
   isError: boolean;
-  input?: any;  // Optional, for context
+  input?: unknown;  // Optional, for context
 }

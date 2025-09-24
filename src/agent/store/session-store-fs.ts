@@ -15,8 +15,9 @@
 import { promises as fs } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { resolveDataPath } from '../../shared/paths';
+import type { ContentBlock, MessageParam, StreamingState, ToolRequest } from '../anthropic/types';
 
-type Json = Record<string, any>;
+type Json = Record<string, unknown>;
 
 interface SessionIndexItem {
   id: string;
@@ -38,7 +39,7 @@ interface Snapshot {
   workingDir: string;
   maxMode: boolean;
   phase?: string;
-  pendingTools?: any[];
+  pendingTools?: ToolRequest[];
   initiatorDeviceId?: string;
   previousResponseId?: string;
   workPlan?: {
@@ -53,8 +54,8 @@ interface Snapshot {
       completedAt?: string;
     }>;
   };
-  conversation: { messages: any[] };
-  streamingState?: any;
+  conversation: { messages: MessageParam[] };
+  streamingState?: StreamingState;
   lastSeq?: number;
 }
 
@@ -187,11 +188,47 @@ class SessionStoreFs {
         snap.title = opts.titleIfFirst;
       }
       // Append user message (string content)
-      snap.conversation.messages.push({ role: 'user', content });
+      snap.conversation.messages.push({ role: 'user', content } satisfies MessageParam);
       snap.messageCount = snap.conversation.messages.length;
       snap.lastActivity = new Date().toISOString();
       await this.writeSnapshot(sessionId, snap);
       await this.appendEvent(sessionId, { type: 'user_message', content, ts: snap.lastActivity });
+      await this.upsertIndex({
+        id: snap.id,
+        title: snap.title,
+        createdAt: snap.createdAt,
+        lastActivity: snap.lastActivity,
+        messageCount: snap.messageCount,
+        workingDir: snap.workingDir,
+        maxMode: snap.maxMode,
+        phase: snap.phase,
+      });
+    });
+  }
+
+  /**
+   * Persist a user message containing structured content blocks (e.g., images + text).
+   * This stores the blocks array as-is to allow the client to re-render images on reload.
+   */
+  async recordUserMessageBlocks(sessionId: string, blocks: ContentBlock[], opts: { workingDir: string; maxMode?: boolean; titleIfFirst?: string }): Promise<void> {
+    if (!sessionId) throw new Error('recordUserMessageBlocks requires a valid sessionId');
+    await this.enqueue(sessionId, async () => {
+      const snap = await this.readSnapshot(sessionId);
+      if (!snap) return;
+      if (typeof opts.maxMode === 'boolean') {
+        snap.maxMode = !!opts.maxMode;
+      }
+      if (opts.workingDir && opts.workingDir !== snap.workingDir) {
+        snap.workingDir = opts.workingDir;
+      }
+      if (snap.messageCount === 0 && opts.titleIfFirst && snap.title === 'New Chat') {
+        snap.title = opts.titleIfFirst;
+      }
+      snap.conversation.messages.push({ role: 'user', content: Array.isArray(blocks) ? blocks : [] } satisfies MessageParam);
+      snap.messageCount = snap.conversation.messages.length;
+      snap.lastActivity = new Date().toISOString();
+      await this.writeSnapshot(sessionId, snap);
+      await this.appendEvent(sessionId, { type: 'user_message_blocks', blocksCount: Array.isArray(blocks) ? blocks.length : 0, ts: snap.lastActivity });
       await this.upsertIndex({
         id: snap.id,
         title: snap.title,
@@ -514,4 +551,3 @@ class SessionStoreFs {
 }
 
 export const sessionStoreFs = new SessionStoreFs();
-

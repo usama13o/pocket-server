@@ -7,7 +7,7 @@
     "enabled": true,
     "rules": {
       "suspicious": {
-        "noExplicitAny": "warn",
+        "noExplicitAny": "off",
         "useIterableCallbackReturn": "error"
       },
       "complexity": {
@@ -22,9 +22,16 @@
       }
     }
   },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
   "files": {
     "includes": ["./src/**"],
     "ignoreUnknown": true
   }
 }
-

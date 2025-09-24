@@ -1,16 +1,19 @@
 /**
  * OpenAI (GPT-5) Service
  * Manages sessions, streams, tools, and approvals for the OpenAI provider.
+ *
+ * Provider-agnostic Turn lifecycle: emits `agent:turn` to drive planning banners on clients.
  */
 
 import OpenAI from 'openai';
 import { logger } from '../../shared/logger';
-import type { ServerMessage } from '../anthropic/types';
+import type { ServerMessage, Turn } from '../anthropic/types';
 import { loadProjectContext } from '../context/loader';
 import { generateConversationTitle } from '../core/title';
 import { sessionStoreFs } from '../store/session-store-fs';
 import { processOpenAIStream } from './streaming.js';
 import { openaiTools } from './tools/index.js';
+import { saveSessionImage, readSessionImageBase64, buildSessionAssetPath } from '../store/session-assets';
 
 interface OpenAISessionState {
   id: string;
@@ -26,6 +29,7 @@ interface OpenAISessionState {
     path: string;
     content: string;
   };
+  activeTurn?: Turn;
 }
 
 class OpenAIServiceImpl {
@@ -126,6 +130,93 @@ class OpenAIServiceImpl {
     } catch (e) {
       return typeof raw === 'string' ? raw : JSON.stringify(raw);
     }
+  }
+
+  /**
+   * Convert a mobile content payload (string or ContentBlock[]) into
+   * OpenAI Responses API input parts under a single user role.
+   * Image blocks are mapped to input_image (data URLs or http(s) URLs),
+   * text blocks to input_text. Detail defaults to 'auto'.
+   */
+  private buildOpenAIInputFromContent(content: string | any[]): Array<{ role: 'user'; content: any[] }> {
+    // String content -> single input_text part
+    if (typeof content === 'string') {
+      const text = content.trim();
+      const parts = text ? [{ type: 'input_text', text }] : [];
+      return [{ role: 'user', content: parts }];
+    }
+    // Array of blocks -> map to parts
+    const parts: any[] = [];
+    for (const block of Array.isArray(content) ? content : []) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text' && typeof block.text === 'string') {
+        const t = block.text.trim();
+        if (t.length > 0) parts.push({ type: 'input_text', text: t });
+      } else if (block.type === 'image' && block.source && typeof block.source === 'object') {
+        const src: any = block.source;
+        if (src.type === 'base64' && typeof src.media_type === 'string' && typeof src.data === 'string') {
+          const image_url = `data:${src.media_type};base64,${src.data}`;
+          parts.push({ type: 'input_image', image_url, detail: 'auto' });
+        } else if (src.type === 'url' && typeof src.url === 'string') {
+          parts.push({ type: 'input_image', image_url: src.url, detail: 'auto' });
+        } else if (src.type === 'file' && typeof src.file_id === 'string') {
+          // If the app ever sends a file_id, forward as-is. The OpenAI SDK may accept file ids.
+          parts.push({ type: 'input_image', image_url: src.file_id, detail: 'auto' });
+        }
+      }
+    }
+    return [{ role: 'user', content: parts }];
+  }
+
+  /**
+   * Convert URL-rewritten blocks (saved to disk) into OpenAI inputs by reloading
+   * the file and embedding as a data URL. This avoids requiring a public URL.
+   */
+  private async buildOpenAIInputFromPersistedBlocks(sessionId: string, blocks: any[]): Promise<Array<{ role: 'user'; content: any[] }>> {
+    const parts: any[] = [];
+    for (const block of Array.isArray(blocks) ? blocks : []) {
+      if (block?.type === 'text' && typeof block.text === 'string') {
+        const t = block.text.trim();
+        if (t) parts.push({ type: 'input_text', text: t });
+      } else if (block?.type === 'image' && block.source && typeof block.source === 'object') {
+        const src: any = block.source;
+        if (src.type === 'url' && typeof src.url === 'string') {
+          try {
+            const u = new URL(src.url, 'http://dummy');
+            const sid = u.searchParams.get('id') || sessionId;
+            const file = u.searchParams.get('file');
+            if (file) {
+              const loaded = await readSessionImageBase64(sid, file);
+              if (loaded) {
+                const image_url = `data:${loaded.mediaType};base64,${loaded.base64}`;
+                parts.push({ type: 'input_image', image_url, detail: 'auto' });
+              }
+            }
+          } catch {}
+        } else if (src.type === 'base64' && typeof src.media_type === 'string' && typeof src.data === 'string') {
+          // Fallback if any base64 slipped through
+          const image_url = `data:${src.media_type};base64,${src.data}`;
+          parts.push({ type: 'input_image', image_url, detail: 'auto' });
+        }
+      }
+    }
+    return [{ role: 'user', content: parts }];
+  }
+
+  /**
+   * Extract only visible user text from a string or ContentBlock[].
+   * Avoid persisting base64 image data to session storage and titles.
+   */
+  private summarizeUserText(content: string | any[]): string {
+    if (typeof content === 'string') return content;
+    const texts: string[] = [];
+    for (const block of Array.isArray(content) ? content : []) {
+      if (block && block.type === 'text' && typeof block.text === 'string') {
+        const t = block.text.trim();
+        if (t.length > 0) texts.push(t);
+      }
+    }
+    return texts.join('\n');
   }
 
   private initClient(apiKey: string): OpenAI {
@@ -294,6 +385,11 @@ class OpenAIServiceImpl {
     return s;
   }
 
+  peekActiveTurn(sessionId: string): Turn | undefined {
+    const s = this.sessions.get(sessionId);
+    return s?.activeTurn;
+  }
+
   async processMessage(message: any, apiKey: string, onMessage: (m: ServerMessage) => void): Promise<void> {
     const { sessionId, content, workingDir = process.cwd(), maxMode = false } = message;
     logger.agent('openai:message_in', sessionId, { hasContent: !!content, workingDir, maxMode });
@@ -305,7 +401,7 @@ class OpenAIServiceImpl {
     // Title generation on first message using Anthropic-based core generator
     if (!state.titleGenerated) {
       try {
-        const title = await generateConversationTitle(typeof content === 'string' ? content : JSON.stringify(content));
+        const title = await generateConversationTitle(this.summarizeUserText(content as any));
         state.title = title || 'New Chat';
         state.titleGenerated = true;
         try { await (await import('../store/session-store-fs.js')).sessionStoreFs.updateTitle(sessionId, state.title); } catch {}
@@ -324,8 +420,42 @@ class OpenAIServiceImpl {
       }
     } catch {}
 
-    // Wrap onMessage to capture tool requests for later approvals
+    // Wrap onMessage to capture tool requests and reflect Turn phases
+    const turnId = `turn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const send = (m: ServerMessage) => {
+      // Reflect turn phase transitions onto activeTurn
+      if (m.type === 'agent:status') {
+        if (m.phase === 'awaiting_tool') {
+          if (state.activeTurn) {
+            state.activeTurn = { ...state.activeTurn, phase: 'awaiting_tool' } as any;
+            onMessage({ type: 'agent:turn', sessionId, event: 'phase', turnId, turn: state.activeTurn } as any);
+          }
+        }
+        if ((m as any).phase === 'assistant_activity') {
+          if (state.activeTurn && !state.activeTurn.endedAt) {
+            const endedAt = new Date().toISOString();
+            const dur = Math.max(0, new Date(endedAt).getTime() - new Date(state.activeTurn.startedAt).getTime());
+            state.activeTurn = { ...state.activeTurn, phase: 'streaming', endedAt, lastDurationMs: dur } as any;
+            onMessage({ type: 'agent:turn', sessionId, event: 'phase', turnId, turn: state.activeTurn } as any);
+          }
+        }
+        if (m.phase === 'streaming') {
+          if (state.activeTurn && !state.activeTurn.endedAt) {
+            const endedAt = new Date().toISOString();
+            const dur = Math.max(0, new Date(endedAt).getTime() - new Date(state.activeTurn.startedAt).getTime());
+            state.activeTurn = { ...state.activeTurn, phase: 'streaming', endedAt, lastDurationMs: dur } as any;
+            onMessage({ type: 'agent:turn', sessionId, event: 'phase', turnId, turn: state.activeTurn } as any);
+          }
+        }
+        if (m.phase === 'completed' || m.phase === 'error' || m.phase === 'stopped') {
+          if (state.activeTurn && !state.activeTurn.endedAt) {
+            const endedAt = new Date().toISOString();
+            const dur = Math.max(0, new Date(endedAt).getTime() - new Date(state.activeTurn.startedAt).getTime());
+            state.activeTurn = { ...state.activeTurn, phase: (m.phase as any), endedAt, lastDurationMs: dur } as any;
+            onMessage({ type: 'agent:turn', sessionId, event: 'done', turnId, turn: state.activeTurn } as any);
+          }
+        }
+      }
       if (m.type === 'agent:tool_request' && (m as any).toolRequest) {
         const tr = (m as any).toolRequest as { id: string; name: string; providerName?: string; input: any; responseId?: string };
         // Store provider tool name for execution; UI receives canonical name via STREAM adapter
@@ -336,12 +466,66 @@ class OpenAIServiceImpl {
 
     // Record user message in session snapshot for authoritative conversation state
     try {
-      await sessionStoreFs.recordUserMessage(sessionId, typeof content === 'string' ? content : JSON.stringify(content), { workingDir, maxMode });
+      const summary = this.summarizeUserText(content as any);
+      // If blocks with images, save to disk and persist rewritten blocks
+      if (Array.isArray(content)) {
+        const rewritten: any[] = [];
+        for (const block of content as any[]) {
+          if (block?.type === 'image' && block.source?.type === 'base64') {
+            const mediaType = block.source.media_type;
+            const data = block.source.data;
+            if (typeof mediaType === 'string' && typeof data === 'string' && data.length > 0) {
+              try {
+                const saved = await saveSessionImage(sessionId, mediaType, data);
+                const assetUrl = buildSessionAssetPath(sessionId, saved.fileName);
+                rewritten.push({ type: 'image', source: { type: 'url', url: assetUrl }, dimension: block.dimension });
+              } catch {
+                // If save fails, keep as base64 to not lose the image
+                rewritten.push(block);
+              }
+            } else {
+              rewritten.push(block);
+            }
+          } else {
+            rewritten.push(block);
+          }
+        }
+        await (sessionStoreFs as any).recordUserMessageBlocks(sessionId, rewritten, { workingDir, maxMode });
+      } else {
+        await sessionStoreFs.recordUserMessage(sessionId, summary, { workingDir, maxMode });
+      }
     } catch {}
 
-    // Build minimal input: only the latest user message
-    const userText: string = typeof content === 'string' ? content : JSON.stringify(content);
-    const historyInput: Array<{ role: 'user'; content: string }> = [{ role: 'user', content: userText }];
+    // Determine anchor index for this turn after persistence
+    let anchorIndex = 0;
+    try {
+      const snap = await sessionStoreFs.getSnapshot(sessionId);
+      const msgs = Array.isArray(snap?.conversation?.messages) ? snap!.conversation.messages : [];
+      anchorIndex = Math.max(0, msgs.length - 1);
+    } catch {}
+
+    // Create/emit Turn (planning phase)
+    const nowIso = new Date().toISOString();
+    state.activeTurn = { id: turnId, sessionId, anchorIndex, phase: 'planning', startedAt: nowIso } as any;
+    onMessage({ type: 'agent:turn', sessionId, event: 'created', turnId, turn: state.activeTurn } as any);
+
+    // Build minimal input: only the latest user message with proper image/text parts
+    let historyInput: Array<{ role: 'user'; content: any[] }>;
+    if (Array.isArray(content)) {
+      // Prefer using rewritten persisted blocks (URLs pointing to our asset route)
+      // so we can reload file bytes and embed as data URLs
+      const persisted = await (async () => {
+        try {
+          const snap = await sessionStoreFs.getSnapshot(sessionId);
+          const last = snap?.conversation?.messages?.slice(-1)?.[0];
+          if (last && Array.isArray(last.content)) return last.content as any[];
+        } catch {}
+        return content as any[];
+      })();
+      historyInput = await this.buildOpenAIInputFromPersistedBlocks(sessionId, persisted);
+    } else {
+      historyInput = this.buildOpenAIInputFromContent(content as any);
+    }
 
     // Pass previous_response_id when available
     const { previousResponseId } = state;
@@ -377,6 +561,14 @@ class OpenAIServiceImpl {
 
     // Auto-approve and execute any pending tools in Max Mode
     await this.runAutoApproveCycle(sessionId, apiKey, onMessage);
+
+    // Finalize turn if still open
+    if (state.activeTurn && !state.activeTurn.endedAt) {
+      const endedAt = new Date().toISOString();
+      const dur = Math.max(0, new Date(endedAt).getTime() - new Date(state.activeTurn.startedAt).getTime());
+      state.activeTurn = { ...state.activeTurn, phase: 'completed', endedAt, lastDurationMs: dur } as any;
+      onMessage({ type: 'agent:turn', sessionId, event: 'done', turnId, turn: state.activeTurn } as any);
+    }
   }
 
   async processToolResponse(message: any, apiKey: string, onMessage: (m: ServerMessage) => void): Promise<void> {
@@ -429,6 +621,12 @@ class OpenAIServiceImpl {
       const s = this.sessions.get(sessionId);
       if (s) {
         s.pendingTools = {} as any;
+        // Mark turn as stopped if still open
+        if (s.activeTurn && !s.activeTurn.endedAt) {
+          const endedAt = new Date().toISOString();
+          const dur = Math.max(0, new Date(endedAt).getTime() - new Date(s.activeTurn.startedAt).getTime());
+          s.activeTurn = { ...s.activeTurn, phase: 'stopped', endedAt, lastDurationMs: dur } as any;
+        }
       }
     } catch {}
   }

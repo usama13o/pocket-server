@@ -89,6 +89,7 @@ Plan discipline:
 - Keep the plan synchronized as you work. After the Analyze phase, revise the plan with concrete, file-specific steps.
 - Before a new major subtask, revise if the plan needs new items or reordering.
 - Mark steps complete as soon as each is finished, so users see progress.
+- Single plan rule: There is exactly one work plan per session. If a plan already exists, do not call work_plan.create again—use work_plan.revise to modify and work_plan.complete to mark progress. Reuse stable step ids; never fork or duplicate plans.
 
 Tool usage requirements:
 - When you need to perform multiple independent operations, prefer using tools in parallel when appropriate.

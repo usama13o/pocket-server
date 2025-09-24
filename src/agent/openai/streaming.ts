@@ -3,8 +3,10 @@
  * Maps GPT-5 events to our `agent:stream_event` / `agent:stream_complete`.
  *
  * High-confidence, docs-aligned behavior:
- * - Derive "thinking" from final reasoning summaries in the Responses API output.
- * - Do not rely on undocumented streaming reasoning events.
+ * - Stream reasoning summary deltas in real time when available (Responses API SSE):
+ *   - response.reasoning_summary_text.delta → thinking_delta
+ *   - response.reasoning_summary_text.done  → close thinking block
+ *   - response.reasoning_summary_part.added → optional section boundary (ignored by default)
  * - Preserve function call streaming and output_text streaming per docs.
  */
 
@@ -56,11 +58,6 @@ export async function processOpenAIStream(args: ProcessArgs): Promise<{ response
       instructions,
       input: typeof content === 'string' ? content : (content as any),
       tools: openaiToolDefinitions as any,
-      tool_choice: {
-        type: 'allowed_tools',
-        mode: 'auto',
-        tools: openaiToolDefinitions.map((t: any) => ({ type: 'function', name: t.name })),
-      } as any,
       parallel_tool_calls: true,
       reasoning: { effort: 'high', summary: 'auto' } as any,
       text: { verbosity: 'medium' },
@@ -71,6 +68,8 @@ export async function processOpenAIStream(args: ProcessArgs): Promise<{ response
     };
     const options: any = abortSignal ? { signal: abortSignal } : undefined;
     const stream = options ? await client.responses.create(params, options) : await client.responses.create(params);
+    let messageStartAt: number | null = null;
+    let thinkingStartAt: number | null = null;
 
     logger.agent('openai:stream_started', sessionId, {
       inputShape: Array.isArray(content) ? 'array' : typeof content,
@@ -90,6 +89,7 @@ export async function processOpenAIStream(args: ProcessArgs): Promise<{ response
     let textBlockStarted = false;
     let textBlockIndex = -1;
     let aggregatedThinking = '';
+    let reasoningBlockOpen = false;
     let aggregatedText = '';
     const toolAgg: Record<number, { callId: string; name: string; args: string; itemId?: string }> = {};
     let sawToolCall = false; // if true, do not finalize this turn; await tool outputs
@@ -121,6 +121,9 @@ export async function processOpenAIStream(args: ProcessArgs): Promise<{ response
         onMessage({ type: 'agent:stream_event', sessionId, streamEvent: { type: 'message_start', message: { id: messageId } } } as any);
         onMessage({ type: 'agent:status', sessionId, phase: 'streaming' } as any);
         emittedStart = true;
+        messageStartAt = Date.now();
+        // if we later detect reasoning, we will set thinkingStartAt; otherwise treat message start as the start
+        if (thinkingStartAt === null) thinkingStartAt = messageStartAt;
         logger.agent('openai:response_start', sessionId, { responseId: openaiResponseId || messageId });
       }
       // Capture OpenAI response id if seen later in the stream
@@ -134,6 +137,36 @@ export async function processOpenAIStream(args: ProcessArgs): Promise<{ response
       // Signal reasoning phase when a reasoning output item is added
       if ((event as any).type === 'response.output_item.added' && (event as any).item?.type === 'reasoning') {
         onMessage({ type: 'agent:status', sessionId, phase: 'reasoning' } as any);
+        if (thinkingStartAt === null) thinkingStartAt = Date.now();
+      }
+      // Stream reasoning summary deltas as thinking
+      if ((event as any).type === 'response.reasoning_summary_text.delta') {
+        const delta: string = (event as any).delta || '';
+        if (delta && delta.length > 0) {
+          if (!reasoningBlockOpen) {
+            reasoningBlockOpen = true;
+            thinkingBlockStarted = true;
+            thinkingBlockIndex = blockIdx;
+            onMessage({ type: 'agent:stream_event', sessionId, streamEvent: { type: 'content_block_start', index: thinkingBlockIndex, content_block: { type: 'thinking', thinking: '' } } } as any);
+            blockIdx++;
+            if (thinkingStartAt === null) thinkingStartAt = Date.now();
+            onMessage({ type: 'agent:status', sessionId, phase: 'reasoning' } as any);
+          }
+          aggregatedThinking += delta;
+          onMessage({ type: 'agent:stream_event', sessionId, streamEvent: { type: 'content_block_delta', index: thinkingBlockIndex, delta: { type: 'thinking_delta', thinking: delta } } } as any);
+        }
+        continue;
+      }
+      if ((event as any).type === 'response.reasoning_summary_text.done') {
+        if (reasoningBlockOpen && thinkingBlockIndex >= 0) {
+          onMessage({ type: 'agent:stream_event', sessionId, streamEvent: { type: 'content_block_stop', index: thinkingBlockIndex } } as any);
+          reasoningBlockOpen = false;
+        }
+        continue;
+      }
+      if ((event as any).type === 'response.reasoning_summary_part.added') {
+        // Optional: could close/open sections; we keep a single block for simplicity
+        continue;
       }
       if (event.type === 'response.output_item.added' && event.item?.type === 'function_call') {
         const idx = event.output_index as number;
@@ -187,6 +220,8 @@ export async function processOpenAIStream(args: ProcessArgs): Promise<{ response
         // Stream assistant text tokens
         const t: string | undefined = event.delta || '';
         if (t && t.length > 0) {
+          // First visible assistant activity
+          onMessage({ type: 'agent:status', sessionId, phase: 'assistant_activity' } as any);
           if (!textBlockStarted) {
             textBlockStarted = true;
             textBlockIndex = blockIdx;
@@ -233,6 +268,9 @@ export async function processOpenAIStream(args: ProcessArgs): Promise<{ response
       const partialBlocks: any[] = [];
       if (aggregatedText && aggregatedText.length > 0) {
         partialBlocks.push({ type: 'text', text: aggregatedText });
+      }
+      if (aggregatedThinking && aggregatedThinking.length > 0) {
+        partialBlocks.unshift({ type: 'thinking', thinking: aggregatedThinking });
       }
       if (partialBlocks.length > 0) {
         const uiFinalId = messageId || randomUUID();
@@ -345,7 +383,8 @@ export async function processOpenAIStream(args: ProcessArgs): Promise<{ response
     // Build final message preserving thinking and text
     const finalBlocks: any[] = [];
     if (aggregatedThinking && aggregatedThinking.length > 0) {
-      finalBlocks.push({ type: 'thinking', thinking: aggregatedThinking });
+      const durationMs = (typeof thinkingStartAt === 'number') ? Math.max(0, Date.now() - thinkingStartAt) : undefined;
+      finalBlocks.push(durationMs !== undefined ? { type: 'thinking', thinking: aggregatedThinking, duration_ms: durationMs } as any : { type: 'thinking', thinking: aggregatedThinking } as any);
     }
     finalBlocks.push({ type: 'text', text: aggregatedText });
 

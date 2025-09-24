@@ -4,7 +4,7 @@ import { logger } from '../shared/logger';
 import { getPublicBaseUrl } from '../shared/public-url';
 import { getDevice, upsertDevice } from './device-registry';
 import { isLocalRequest } from './middleware';
-import { getPairingState, isPairingActive, verifyPin } from './pairing';
+import { getPairingState, isPairingActive, recordRemotePairAttempt, verifyPin, verifyRemotePairToken } from './pairing';
 import { signAccessToken } from './token';
 
 export function registerAuthRoutes(router: Router): void {
@@ -28,7 +28,7 @@ export function registerAuthRoutes(router: Router): void {
       const expiresAt = active ? state.expiresAt ?? null : null;
       const now = Date.now();
       const secondsLeft = active && expiresAt ? Math.max(0, Math.ceil((new Date(expiresAt).getTime() - now) / 1000)) : 0;
-      const body = JSON.stringify({ active, expiresAt, secondsLeft });
+      const body = JSON.stringify({ active, mode: state.mode || 'local', expiresAt, secondsLeft });
       return new Response(body, {
         headers: {
           'Content-Type': 'application/json',
@@ -44,26 +44,38 @@ export function registerAuthRoutes(router: Router): void {
     }
   });
 
-  // Public: pair device (local-only, window, PIN)
+  // Public: pair device (local by default; remote allowed only with active remote token)
   router.post('/pair', async (req) => {
     if (!isPairingActive()) {
       return new Response(JSON.stringify({ success: false, error: 'pairing_not_active' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
     }
     const publicHost = getPublicBaseUrl();
-    if (!isLocalRequest(req, publicHost)) {
-      return new Response(JSON.stringify({ success: false, error: 'pairing_not_local' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
-    }
     try {
-      const body = await req.json() as { deviceId: string; pin: string; platform?: string; name?: string; reset?: boolean };
+      const body = await req.json() as { deviceId: string; pin: string; platform?: string; name?: string; reset?: boolean; pairToken?: string };
       if (!body?.deviceId || !body?.pin) {
         return new Response(JSON.stringify({ success: false, error: 'invalid_input' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
       }
+      // Determine locality and mode
+      const local = isLocalRequest(req, publicHost);
+      const state = getPairingState();
+      if (!local) {
+        // Remote requests are only allowed if pairing window is remote and token matches
+        if (state.mode !== 'remote') {
+          return new Response(JSON.stringify({ success: false, error: 'pairing_not_local' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+        }
+        if (!body.pairToken || !verifyRemotePairToken(body.pairToken)) {
+          recordRemotePairAttempt(false);
+          return new Response(JSON.stringify({ success: false, error: 'pairing_denied' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+        }
+      }
       if (!verifyPin(body.pin)) {
+        if (!local && state.mode === 'remote') recordRemotePairAttempt(false);
         return new Response(JSON.stringify({ success: false, error: 'invalid_pin' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
       }
       const existing = getDevice(body.deviceId);
       if (existing && !existing.revoked && !body.reset) {
         logger.info('Auth', 'device_already_paired', { deviceId: existing.deviceId });
+        if (!local && state.mode === 'remote') recordRemotePairAttempt(true);
         return new Response(JSON.stringify({ success: true, alreadyPaired: true }), { headers: { 'Content-Type': 'application/json' } });
       }
       const secret = existing && !existing.revoked && body.reset
@@ -71,6 +83,7 @@ export function registerAuthRoutes(router: Router): void {
         : crypto.randomBytes(32).toString('hex');
       const saved = upsertDevice({ deviceId: body.deviceId, secret, platform: body.platform, name: body.name });
       logger.info('Auth', existing && body.reset ? 'device_secret_rotated' : 'device_paired', { deviceId: saved.deviceId, platform: saved.platform, name: saved.name });
+      if (!local && state.mode === 'remote') recordRemotePairAttempt(true);
       return new Response(JSON.stringify({ success: true, data: { deviceId: saved.deviceId, secret: saved.secret }, alreadyPaired: false }), { headers: { 'Content-Type': 'application/json' } });
     } catch (e) {
       logger.error('Auth', 'pair_failed', e as any);

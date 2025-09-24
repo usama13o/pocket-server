@@ -15,9 +15,30 @@ import { executeWorkPlan, workPlanToolDefinition } from './tools/work-plan';
 import type {
   AgentSession,
   ClientMessage,
+  ContentBlock,
+  Message,
+  MessageParam,
+  BashToolInput,
+  TextEditorCommand,
   ServerMessage,
   ToolResultBlock,
+  WebSearchToolInput,
+  WorkPlanCommand,
+  Turn,
+  SessionSnapshot,
 } from './types';
+
+type SessionSummary = {
+  id: string;
+  title: string;
+  createdAt: Date;
+  lastActivity: Date;
+  messageCount: number;
+  workingDir: string;
+  maxMode: boolean;
+  phase: AgentSession['phase'];
+};
+import { readSessionImageBase64 } from '../store/session-assets';
 
 export class AnthropicService {
   private anthropic: Anthropic | null = null;
@@ -95,6 +116,20 @@ export class AnthropicService {
     onMessage: (msg: ServerMessage) => void
   ): Promise<void> {
     const { sessionId, content, workingDir = process.cwd(), maxMode = false, chatMode = !maxMode } = message;
+    const reqStart = Date.now();
+    try {
+      console.log(
+        JSON.stringify({
+          at: 'anthropic_process_message_start',
+          sessionId,
+          provider: 'anthropic',
+          workingDir,
+          maxMode,
+          chatMode,
+          hasContent: typeof content === 'string' ? content.length : Array.isArray(content),
+        })
+      );
+    } catch {}
     
     if (!content) {
       onMessage({
@@ -110,25 +145,102 @@ export class AnthropicService {
     session.maxMode = maxMode;
     session.workingDir = workingDir;
     session.phase = 'starting';
-    onMessage({ type: 'agent:status', sessionId, phase: 'starting' } as any);
+    const startingStatus: ServerMessage = {
+      type: 'agent:status',
+      sessionId,
+      phase: 'starting',
+    };
+    onMessage(startingStatus);
     
     // Generate title for first message and persist
     if (session.conversation.messages.length === 0) {
-      const title = await generateConversationTitle(content, apiKey);
+      const titleSource = typeof content === 'string'
+        ? content
+        : Array.isArray(content)
+          ? content
+              .map((block) => (block && block.type === 'text' ? block.text : ''))
+              .filter(Boolean)
+              .join('\n')
+          : '';
+      const title = await generateConversationTitle(titleSource, apiKey);
       session.conversation.title = title;
       try { await (await import('../store/session-store-fs.js')).sessionStoreFs.updateTitle(sessionId, title); } catch {}
       onMessage({ type: 'agent:title', sessionId, title });
     }
 
-    // Add user message to conversation
-    session.conversation.messages.push({
+    // Add user message to conversation (keep anchor index for the turn)
+    const anchorIndex = session.conversation.messages.length;
+    const userMessage: MessageParam = {
       role: 'user',
-      content
-    });
+      content,
+    };
+    session.conversation.messages.push(userMessage);
     session.conversation.updatedAt = new Date();
-    try { await (await import('../store/session-store-fs.js')).sessionStoreFs.recordUserMessage(sessionId, content, { workingDir, maxMode }); } catch {}
+    try {
+      const ss = await import('../store/session-store-fs.js');
+      if (Array.isArray(content)) {
+        // Rewrite base64 images to persisted URLs for snapshot
+        const { saveSessionImage, buildSessionAssetPath } = await import('../store/session-assets.js');
+        const rewritten: ContentBlock[] = [];
+        for (const block of content) {
+          if (block?.type === 'image' && block.source?.type === 'base64') {
+            const mediaType = block.source.media_type;
+            const data = block.source.data;
+            if (typeof mediaType === 'string' && typeof data === 'string' && data.length > 0) {
+              try {
+                const saved = await saveSessionImage(sessionId, mediaType, data);
+                const assetUrl = buildSessionAssetPath(sessionId, saved.fileName);
+                rewritten.push({ type: 'image', source: { type: 'url', url: assetUrl }, dimension: block.dimension ?? null });
+              } catch {
+                rewritten.push(block);
+              }
+            } else {
+              rewritten.push(block);
+            }
+          } else {
+            rewritten.push(block);
+          }
+        }
+        const rewrittenMessage: MessageParam = { role: 'user', content: rewritten };
+        session.conversation.messages[anchorIndex] = rewrittenMessage;
+        await ss.sessionStoreFs.recordUserMessageBlocks(sessionId, rewritten, { workingDir, maxMode });
+      } else if (typeof content === 'string') {
+        await ss.sessionStoreFs.recordUserMessage(sessionId, content, { workingDir, maxMode });
+      }
+    } catch {}
+
+    // Create/emit Turn
+    const turnId = `turn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const nowIso = new Date().toISOString();
+    session.activeTurn = { id: turnId, sessionId, anchorIndex, phase: 'planning', startedAt: nowIso } as Turn;
+    try {
+      console.log(
+        JSON.stringify({
+          at: 'turn_created',
+          provider: 'anthropic',
+          sessionId,
+          turnId,
+          anchorIndex,
+          msgCount: session.conversation.messages.length
+        })
+      );
+    } catch {}
+    const turnCreatedMessage: ServerMessage = {
+      type: 'agent:turn',
+      sessionId,
+      event: 'created',
+      turnId,
+      turn: session.activeTurn,
+    };
+    onMessage(turnCreatedMessage);
+
     session.phase = 'ready';
-    onMessage({ type: 'agent:status', sessionId, phase: 'ready' } as any);
+    const readyStatus: ServerMessage = {
+      type: 'agent:status',
+      sessionId,
+      phase: 'ready',
+    };
+    onMessage(readyStatus);
 
     // Resolve project context once on first user message
     if (session.conversation.messages.length === 1 && !session.projectContext) {
@@ -152,45 +264,84 @@ export class AnthropicService {
     const tools = [bashToolDefinition, editorToolDefinition, webSearchToolDefinition, workPlanToolDefinition];
 
     try {
-      // Store reference to current stream for potential cancellation
       if (session.currentStreamController) {
         session.currentStreamController.abort();
       }
       session.currentStreamController = new AbortController();
 
-      // Use Anthropic SDK's natural streaming pattern
-      console.log(`[AnthropicService] Starting SDK stream for session: ${sessionId}`);
       const anthropic = this.initClient(apiKey);
-      
-      // Prepare stream configuration
       const streamConfig = {
         model: 'claude-sonnet-4-20250514',
         max_tokens: 4096,
         system: systemPrompt,
-        messages: session.conversation.messages as any,
-        tools: tools as any,
-        // Enable extended thinking with a minimal budget first
+        messages: await this.materializeMessagesWithBase64(sessionId, session.conversation.messages),
+        tools,
         thinking: { type: 'enabled', budget_tokens: 1024 },
       };
-      
-      console.log(`[AnthropicService] Stream config prepared, starting SDK stream...`);
+      try {
+        console.log(
+          JSON.stringify({
+            at: 'anthropic_stream_request',
+            provider: 'anthropic',
+            sessionId,
+            turnId,
+            model: streamConfig.model,
+            max_tokens: streamConfig.max_tokens,
+            toolCount: streamConfig.tools?.length ?? 0,
+            msgCount: streamConfig.messages?.length ?? 0
+          })
+        );
+      } catch {}
 
-      // Process stream using SDK's natural event chaining
       const streamingState = await processStream(
         sessionId,
         workingDir,
         maxMode,
-        !maxMode, // chatMode = !maxMode
-        onMessage,
+        !maxMode, // chatMode
+        (msg) => {
+          // Intercept status transitions to update Turn
+          if (msg.type === 'agent:status') {
+            if (msg.phase === 'awaiting_tool') {
+              if (session.activeTurn) {
+                session.activeTurn = { ...session.activeTurn, phase: 'awaiting_tool' } as Turn;
+                const awaitingMessage: ServerMessage = {
+                  type: 'agent:turn',
+                  sessionId,
+                  event: 'phase',
+                  turnId,
+                  turn: session.activeTurn,
+                };
+                onMessage(awaitingMessage);
+              }
+            }
+            if (msg.phase === 'streaming') {
+              // Mark planning complete
+              if (session.activeTurn) {
+                const endedAt = new Date().toISOString();
+                const dur = Math.max(0, new Date(endedAt).getTime() - new Date(session.activeTurn.startedAt).getTime());
+                session.activeTurn = { ...session.activeTurn, phase: 'streaming', endedAt, lastDurationMs: dur } as Turn;
+                const streamingMessage: ServerMessage = {
+                  type: 'agent:turn',
+                  sessionId,
+                  event: 'phase',
+                  turnId,
+                  turn: session.activeTurn,
+                };
+                onMessage(streamingMessage);
+              }
+            }
+          }
+          const forwardedMessage: ServerMessage = { ...msg, turnId };
+          onMessage(forwardedMessage);
+        },
         async (request) => {
-          // Send tool request to client
-          onMessage({
+          const toolRequestMessage: ServerMessage = {
             type: 'agent:tool_request',
             sessionId,
             content: `Tool request: ${request.description}`,
-            toolRequest: request
-          });
-          // Track pending tool for snapshot/status
+            toolRequest: request,
+          };
+          onMessage(toolRequestMessage);
           const s = this.sessions.get(sessionId);
           if (s) {
             s.pendingTools = [...(s.pendingTools || []), request];
@@ -198,7 +349,6 @@ export class AnthropicService {
           }
         },
         async (toolId, output, isError) => {
-          // Process tool result by adding to conversation and continuing
           await this.addToolResultToConversation(session, toolId, output, isError, apiKey, onMessage);
         },
         (state) => {
@@ -214,119 +364,80 @@ export class AnthropicService {
         undefined,
         session.currentStreamController.signal
       );
-      
-      console.log(`[AnthropicService] SDK stream processing completed for session: ${sessionId}`);
 
-      // Update session streaming state
       session.streamingState = streamingState;
 
-      // Add assistant message to conversation if we have content blocks and not aborted
+      try {
+        console.log(
+          JSON.stringify({
+            at: 'anthropic_stream_return',
+            provider: 'anthropic',
+            sessionId,
+            turnId,
+            aborted: !!streamingState.aborted,
+            contentBlocks: streamingState.contentBlocks?.length ?? 0,
+            activeBlockIndex: streamingState.activeBlockIndex,
+            autoToolCount: streamingState.autoToolRequests?.length ?? 0,
+            ms: Date.now() - reqStart
+          })
+        );
+      } catch {}
+
       if (!streamingState.aborted && streamingState.contentBlocks.length > 0) {
-        session.conversation.messages.push({
-          role: 'assistant',
-          content: streamingState.contentBlocks as any
-        });
+        const assistantMessage: MessageParam = { role: 'assistant', content: streamingState.contentBlocks };
+        session.conversation.messages.push(assistantMessage);
         session.conversation.updatedAt = new Date();
       }
 
-      // If in Max mode (auto-approval), we must continue the conversation for each queued tool request
-      // by sending a single user message containing all tool_result blocks, then stream the assistant's continuation.
-      if (maxMode && (streamingState.autoToolRequests && streamingState.autoToolRequests.length > 0)) {
-        const anthropic = this.initClient(apiKey);
+      await this.executeAutoTools(session, apiKey, onMessage);
 
-        // Execute all queued tools and build tool_result blocks (aggregate into a single user message)
-        const toolResultBlocks: any[] = [];
-        for (const req of streamingState.autoToolRequests) {
-          let output = '';
-          let isError = false;
-          try {
-            switch (req.name) {
-              case 'bash':
-                output = await executeBash(req.input, workingDir);
-                isError = output.includes('Error:');
-                break;
-              case 'str_replace_based_edit_tool':
-                output = await executeEditor(req.input, workingDir);
-                isError = output.startsWith('Error:');
-                break;
-              case 'web_search':
-                output = await executeWebSearch(req.input, workingDir);
-                isError = false;
-                break;
-              case 'work_plan':
-                output = await executeWorkPlan(sessionId, req.input);
-                isError = false;
-                break;
-              default:
-                output = `Unknown tool: ${req.name}`;
-                isError = true;
-            }
-          } catch (err: any) {
-            output = `Error: ${err.message}`;
-            isError = true;
-          }
-
-          // Build tool_result block (do NOT push separate user messages for each)
-          const toolResultBlock = {
-            type: 'tool_result',
-            tool_use_id: req.id,
-            content: output,
-            is_error: isError,
-          };
-          toolResultBlocks.push(toolResultBlock);
-
-          // Notify client for UI context (optional)
-          onMessage({
-            type: 'agent:tool_output',
-            sessionId,
-            content: output,
-            message: {
-              id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-              type: 'message',
-              role: 'user',
-              content: [toolResultBlock],
-              model: '',
-              stop_reason: null,
-              stop_sequence: null,
-              usage: { input_tokens: 0, output_tokens: 0 },
-            } as any,
-            toolOutput: {
-              id: req.id,
-              tool_use_id: req.id,
-              name: req.name,
-              output,
-              isError,
-              input: req.input,
-            },
-          });
-        }
-
-        // Push a single user message containing ALL tool_result blocks per Anthropic spec
-        session.conversation.messages.push({ role: 'user', content: toolResultBlocks as any });
-
-        // Continue conversation after all tool results (stream again)
-        await this.continueConversation(session, apiKey, onMessage);
-      }
-
-    } catch (error: any) {
-      if (error.name === 'AbortError') {
-        onMessage({
+    } catch (error: unknown) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        const abortMessage: ServerMessage = {
           type: 'agent:assistant',
           sessionId,
           content: session.streamingState.activeBlockContent || '',
-          isComplete: true
-        });
+          isComplete: true,
+        };
+        onMessage(abortMessage);
       } else {
-        console.error(`[AnthropicService] Error processing message:`, error);
-        onMessage({
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage: ServerMessage = {
           type: 'agent:error',
           sessionId,
-          error: error.message
-        });
+          error: message,
+        };
+        onMessage(errorMessage);
       }
     } finally {
       session.currentStreamController = undefined;
+      // Finalize Turn if still present
+      if (session.activeTurn && !session.activeTurn.endedAt) {
+        const endedAt = new Date().toISOString();
+        const dur = Math.max(0, new Date(endedAt).getTime() - new Date(session.activeTurn.startedAt).getTime());
+        session.activeTurn = { ...session.activeTurn, phase: 'completed', endedAt, lastDurationMs: dur } as Turn;
+        const turnDoneMessage: ServerMessage = {
+          type: 'agent:turn',
+          sessionId,
+          event: 'done',
+          turnId,
+          turn: session.activeTurn,
+        };
+        onMessage(turnDoneMessage);
+      }
+      try {
+        console.log(
+          JSON.stringify({
+            at: 'anthropic_process_message_end',
+            provider: 'anthropic',
+            sessionId,
+            turnId,
+            ms: Date.now() - reqStart
+          })
+        );
+      } catch {}
     }
+    // Auto tool execution handled in executeAutoTools
   }
 
   /**
@@ -359,121 +470,185 @@ export class AnthropicService {
     }
 
     const { id: toolId, approved } = toolResponse;
+    try {
+      console.log(
+        JSON.stringify({
+          at: 'tool_response_received',
+          provider: 'anthropic',
+          sessionId,
+          toolId,
+          approved
+        })
+      );
+    } catch {}
 
-    // Find the tool use in the last assistant message
-    const lastMessage = session.conversation.messages[session.conversation.messages.length - 1];
-    if (!lastMessage || lastMessage.role !== 'assistant') {
-      onMessage({
-        type: 'agent:error',
-        sessionId,
-        error: 'No assistant message found'
-      });
-      return;
-    }
-
-    const toolUse = (lastMessage.content as any[])?.find(
-      (block: any) => block.type === 'tool_use' && block.id === toolId
-    );
-
-    if (!toolUse) {
-      onMessage({
-        type: 'agent:error',
-        sessionId,
-        error: 'Tool use not found'
-      });
-      return;
-    }
-
-    // Mark decision in pendingTools for this assistant turn
+    // Record approval decision on the pending tool immediately
     const pendingList = session.pendingTools || [];
     const idx = pendingList.findIndex((t) => t.id === toolId);
     if (idx >= 0) {
-      (pendingList[idx] as any).approved = approved;
+      pendingList[idx] = { ...pendingList[idx], approved };
       session.pendingTools = pendingList;
-    }
-
-    // If not all tools have been decided yet, wait for more approvals
-    const allDecided = (session.pendingTools || []).length > 0
-      ? (session.pendingTools || []).every((t: any) => typeof t.approved === 'boolean')
-      : true;
-    if (!allDecided) {
-      onMessage({ type: 'agent:status', sessionId, phase: 'awaiting_tool' } as any);
+    } else {
+      onMessage({
+        type: 'agent:error',
+        sessionId,
+        error: 'Pending tool not found'
+      });
       return;
     }
 
-    // All decisions are in: execute approved tools, aggregate tool_result blocks, send a single user message
-    const toolResultBlocks: ToolResultBlock[] = [];
-    for (const req of session.pendingTools || []) {
-      let output = '';
-      let isError = false;
-      const approvedFlag = !!(req as any).approved;
-      if (!approvedFlag) {
-        output = 'Tool use rejected by user';
-        isError = true;
-      } else {
-        try {
-          switch (req.name) {
-            case 'bash':
-              output = await executeBash(req.input, session.workingDir);
-              isError = output.includes('Error:');
-              break;
-            case 'str_replace_based_edit_tool':
-              output = await executeEditor(req.input, session.workingDir);
-              isError = output.startsWith('Error:');
-              break;
-            case 'web_search':
-              output = await executeWebSearch(req.input, session.workingDir);
-              isError = false;
-              break;
-            case 'work_plan':
-              output = await executeWorkPlan(session.id, req.input);
-              isError = false;
-              break;
-            default:
-              output = `Unknown tool: ${req.name}`;
-              isError = true;
-          }
-        } catch (error: any) {
-          output = `Error executing tool: ${error.message}`;
-          isError = true;
-        }
-      }
+    // Defer execution if the assistant tool_use message has not yet been committed
+    const lastMessage = session.conversation.messages[session.conversation.messages.length - 1];
+    const assistantCommitted = !!lastMessage &&
+      lastMessage.role === 'assistant' &&
+      Array.isArray(lastMessage.content) &&
+      lastMessage.content.some(
+        (block): block is Extract<ContentBlock, { type: 'tool_use' }> => block.type === 'tool_use' && block.id === toolId,
+      );
 
-      // Build tool_result and notify UI (per-tool)
-      const toolResult: ToolResultBlock = {
-        type: 'tool_result',
-        tool_use_id: req.id,
-        content: output,
-        is_error: isError
-      };
-      toolResultBlocks.push(toolResult);
-      onMessage({
-        type: 'agent:tool_output',
+    // If not all decisions are in yet, or the assistant turn hasn't been committed, wait
+    const allDecided = (session.pendingTools || []).length > 0
+      ? (session.pendingTools || []).every((t) => typeof t.approved === 'boolean')
+      : true;
+
+    if (!assistantCommitted || !allDecided) {
+      const awaitingStatus: ServerMessage = {
+        type: 'agent:status',
         sessionId,
-        content: output,
-        message: {
-          id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-          type: 'message', role: 'user', content: [toolResult],
-          model: '', stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 },
-        } as any,
-        toolOutput: {
-          id: req.id,
-          tool_use_id: req.id,
-          name: req.name,
-          output,
-          isError,
-          input: req.input
-        }
-      });
+        phase: 'awaiting_tool',
+      };
+      onMessage(awaitingStatus);
+      try {
+        console.log(
+          JSON.stringify({
+            at: 'tool_response_waiting',
+            provider: 'anthropic',
+            sessionId,
+            assistantCommitted,
+            allDecided,
+            pendingCount: (session.pendingTools || []).length
+          })
+        );
+      } catch {}
+      return;
     }
 
-    // Push a single user message with ALL tool_result blocks per Anthropic spec
-    session.conversation.messages.push({ role: 'user', content: toolResultBlocks as any });
-    // Clear pending for this assistant turn
-    session.pendingTools = [];
+    // All decisions are in and assistant message is committed: execute approved tools now
+    {
+      const toolResultBlocks: ToolResultBlock[] = [];
+      for (const req of session.pendingTools || []) {
+        let output = '';
+        let isError = false;
+        const approvedFlag = !!req.approved;
+        if (!approvedFlag) {
+          output = 'Tool use rejected by user';
+          isError = true;
+        } else {
+          try {
+            const tStart = Date.now();
+            console.log(
+              JSON.stringify({
+                at: 'tool_execute_start',
+                provider: 'anthropic',
+                sessionId,
+                toolId: req.id,
+                name: req.name
+              })
+            );
+            switch (req.name) {
+              case 'bash':
+                output = await executeBash(req.input as BashToolInput, session.workingDir);
+                isError = output.includes('Error:');
+                break;
+              case 'str_replace_based_edit_tool':
+                output = await executeEditor(req.input as TextEditorCommand, session.workingDir);
+                isError = output.startsWith('Error:');
+                break;
+              case 'web_search':
+                output = await executeWebSearch(req.input as WebSearchToolInput, session.workingDir);
+                isError = false;
+                break;
+              case 'work_plan':
+                output = await executeWorkPlan(session.id, req.input as WorkPlanCommand);
+                isError = false;
+                break;
+              default:
+                output = `Unknown tool: ${req.name}`;
+                isError = true;
+            }
+            console.log(
+              JSON.stringify({
+                at: 'tool_execute_done',
+                provider: 'anthropic',
+                sessionId,
+                toolId: req.id,
+                name: req.name,
+                isError,
+                chars: output?.length ?? 0,
+                ms: Date.now() - tStart
+              })
+            );
+          } catch (error: unknown) {
+            const errMessage = error instanceof Error ? error.message : 'Unknown tool execution failure';
+            output = `Error executing tool: ${errMessage}`;
+            isError = true;
+            console.error(
+              JSON.stringify({
+                at: 'tool_execute_error',
+                provider: 'anthropic',
+                sessionId,
+                toolId: req.id,
+                name: req.name,
+                message: errMessage,
+              })
+            );
+          }
+        }
 
-    // Continue conversation exactly once
-    await this.continueConversation(session, apiKey, onMessage);
+        // Build tool_result and notify UI (per-tool)
+        const toolResult: ToolResultBlock = {
+          type: 'tool_result',
+          tool_use_id: req.id,
+          content: output,
+          is_error: isError
+        };
+        toolResultBlocks.push(toolResult);
+        const syntheticMessage: Message = {
+          id: `msg_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          type: 'message',
+          role: 'user',
+          content: [toolResult],
+          model: '',
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: 0, output_tokens: 0 },
+        };
+        const toolOutputMessage: ServerMessage = {
+          type: 'agent:tool_output',
+          sessionId: session.id,
+          content: output,
+          message: syntheticMessage,
+          toolOutput: {
+            id: req.id,
+            tool_use_id: req.id,
+            name: req.name,
+            output,
+            isError,
+            input: req.input,
+          },
+        };
+        onMessage(toolOutputMessage);
+      }
+
+      // Push a single user message with ALL tool_result blocks per Anthropic spec
+      const toolResultMessage: MessageParam = { role: 'user', content: toolResultBlocks };
+      session.conversation.messages.push(toolResultMessage);
+      // Clear pending for this assistant turn
+      session.pendingTools = [];
+
+      // Continue conversation exactly once
+      await this.continueConversation(session, apiKey, onMessage);
+    }
   }
 
   /**
@@ -497,10 +672,8 @@ export class AnthropicService {
       is_error: isError
     };
 
-    session.conversation.messages.push({
-      role: 'user',
-      content: [toolResult] as any
-    });
+    const toolMessage: MessageParam = { role: 'user', content: [toolResult] };
+    session.conversation.messages.push(toolMessage);
     session.conversation.updatedAt = new Date();
     // Remove from pending tools if present
     session.pendingTools = (session.pendingTools || []).filter(t => t.id !== toolId);
@@ -517,6 +690,17 @@ export class AnthropicService {
     apiKey: string,
     onMessage: (msg: ServerMessage) => void
   ): Promise<void> {
+    await this.runContinuation(session, apiKey, onMessage);
+    await this.executeAutoTools(session, apiKey, onMessage);
+  }
+
+  private async runContinuation(
+    session: AgentSession,
+    apiKey: string,
+    onMessage: (msg: ServerMessage) => void,
+    context: 'manual' | 'auto' = 'manual'
+  ): Promise<void> {
+    const contStart = Date.now();
     const systemPrompt = generateSystemPrompt({
       workingDirectory: session.workingDir,
       projectContext: session.projectContext
@@ -532,24 +716,35 @@ export class AnthropicService {
       }
       session.currentStreamController = new AbortController();
 
-      // Continue with Anthropic SDK's natural streaming pattern
-      const anthropic = this.initClient(apiKey);
       const streamConfig = {
         model: 'claude-sonnet-4-20250514',
         max_tokens: 4096,
         system: systemPrompt,
-        messages: session.conversation.messages as any,
-        tools: tools as any,
-        // Enable extended thinking for continuations as well
+        messages: await this.materializeMessagesWithBase64(session.id, session.conversation.messages),
+        tools,
         thinking: { type: 'enabled', budget_tokens: 1024 },
       };
 
-      // Process continuation stream using SDK's natural event chaining
+      const anthropic = this.initClient(apiKey);
+      try {
+        console.log(
+          JSON.stringify({
+            at: 'anthropic_continuation_start',
+            provider: 'anthropic',
+            sessionId: session.id,
+            context,
+            model: streamConfig.model,
+            max_tokens: streamConfig.max_tokens,
+            toolCount: streamConfig.tools?.length ?? 0,
+            msgCount: streamConfig.messages?.length ?? 0
+          })
+        );
+      } catch {}
       const streamingState = await processStream(
         session.id,
         session.workingDir,
         session.maxMode,
-        !session.maxMode, // chatMode = !maxMode
+        !session.maxMode,
         onMessage,
         async (request) => {
           onMessage({
@@ -558,109 +753,216 @@ export class AnthropicService {
             content: `Tool request: ${request.description}`,
             toolRequest: request
           });
-          session.pendingTools = [...(session.pendingTools || []), request];
-          session.phase = 'awaiting_tool';
+          const s = this.sessions.get(session.id);
+          if (s) {
+            s.pendingTools = [...(s.pendingTools || []), request];
+            s.phase = 'awaiting_tool';
+          }
         },
         async (toolId, output, isError) => {
-          // Process tool result by adding to conversation and continuing
           await this.addToolResultToConversation(session, toolId, output, isError, apiKey, onMessage);
         },
         (state) => {
-          session.streamingState = state;
-          session.lastActivity = new Date();
-          session.phase = state.isStreaming ? 'streaming' : (state.error ? 'error' : 'ready');
+          const s = this.sessions.get(session.id);
+          if (s) {
+            s.streamingState = state;
+            s.lastActivity = new Date();
+            s.phase = state.isStreaming ? 'streaming' : (state.error ? 'error' : 'ready');
+          }
         },
         anthropic,
-        streamConfig
+        streamConfig,
+        undefined,
+        session.currentStreamController.signal
       );
 
-      // Update session
+      // Update session streaming state
       session.streamingState = streamingState;
-
-      // Add assistant message if we have content
-      if (streamingState.contentBlocks.length > 0) {
-        session.conversation.messages.push({
-          role: 'assistant',
-          content: streamingState.contentBlocks as any
-        });
+      session.lastActivity = new Date();
+      session.phase = streamingState.error ? 'error' : 'ready';
+      if (!streamingState.aborted && streamingState.contentBlocks && streamingState.contentBlocks.length > 0) {
+        const assistantContinuation: MessageParam = { role: 'assistant', content: streamingState.contentBlocks };
+        session.conversation.messages.push(assistantContinuation);
         session.conversation.updatedAt = new Date();
       }
 
-      // If in Max mode with queued auto tool requests, handle them and continue
-      if (session.maxMode && (streamingState.autoToolRequests && streamingState.autoToolRequests.length > 0)) {
-        // Anthropic invariant: for a given assistant turn with tool_use blocks,
-        // the NEXT single user message must include tool_result blocks for ALL ids.
-        const aggregatedResults: any[] = [];
-        for (const req of streamingState.autoToolRequests) {
+      const continuationStatus: ServerMessage = {
+        type: 'agent:status',
+        sessionId: session.id,
+        phase: session.phase,
+      };
+      onMessage(continuationStatus);
+      try {
+        console.log(
+          JSON.stringify({
+            at: 'anthropic_continuation_end',
+            provider: 'anthropic',
+            sessionId: session.id,
+            context,
+            phase: session.phase,
+            ms: Date.now() - contStart
+          })
+        );
+      } catch {}
+
+    } catch (error: unknown) {
+      console.error('[AnthropicService] Continue conversation error:', error);
+      const message = error instanceof Error ? error.message : 'Anthropic continuation error';
+      const errorMessage: ServerMessage = { type: 'agent:error', sessionId: session.id, error: message };
+      onMessage(errorMessage);
+    }
+  }
+
+  private async executeAutoTools(
+    session: AgentSession,
+    apiKey: string,
+    onMessage: (msg: ServerMessage) => void
+  ): Promise<void> {
+    if (!session.maxMode) {
+      return;
+    }
+
+    let iteration = 0;
+    try {
+      while (session.maxMode) {
+        const state = session.streamingState;
+        const autoRequests = state && !state.aborted && Array.isArray(state.autoToolRequests)
+          ? [...state.autoToolRequests]
+          : [];
+        if (session.streamingState && Array.isArray(session.streamingState.autoToolRequests)) {
+          session.streamingState.autoToolRequests = [];
+        }
+
+        if (!autoRequests.length) {
+          break;
+        }
+
+        iteration += 1;
+        console.log(
+          JSON.stringify({
+            at: 'anthropic_autoexec_start',
+            provider: 'anthropic',
+            sessionId: session.id,
+            iteration,
+            count: autoRequests.length,
+            tools: autoRequests.map((t) => ({ id: t.id, name: t.name }))
+          })
+        );
+
+        const toolResultBlocks: ToolResultBlock[] = [];
+        for (const req of autoRequests) {
           let output = '';
           let isError = false;
+          const toolStartedAt = Date.now();
           try {
+            console.log(
+              JSON.stringify({
+                at: 'auto_tool_execute_start',
+                provider: 'anthropic',
+                sessionId: session.id,
+                toolId: req.id,
+                name: req.name
+              })
+            );
             switch (req.name) {
               case 'bash':
-                output = await executeBash(req.input, session.workingDir);
+                output = await executeBash(req.input as BashToolInput, session.workingDir);
                 isError = output.includes('Error:');
                 break;
               case 'str_replace_based_edit_tool':
-                output = await executeEditor(req.input, session.workingDir);
+                output = await executeEditor(req.input as TextEditorCommand, session.workingDir);
                 isError = output.startsWith('Error:');
                 break;
               case 'web_search':
-                output = await executeWebSearch(req.input, session.workingDir);
+                output = await executeWebSearch(req.input as WebSearchToolInput, session.workingDir);
                 isError = false;
                 break;
               case 'work_plan':
-                output = await executeWorkPlan(session.id, req.input);
+                output = await executeWorkPlan(session.id, req.input as WorkPlanCommand);
                 isError = false;
                 break;
               default:
                 output = `Unknown tool: ${req.name}`;
                 isError = true;
             }
-          } catch (err: any) {
-            output = `Error: ${err.message}`;
+            console.log(
+              JSON.stringify({
+                at: 'auto_tool_execute_done',
+                provider: 'anthropic',
+                sessionId: session.id,
+                toolId: req.id,
+                name: req.name,
+                isError,
+                chars: output?.length ?? 0,
+                ms: Date.now() - toolStartedAt
+              })
+            );
+          } catch (error: unknown) {
+            const errMessage = error instanceof Error ? error.message : 'unknown error';
+            output = `Error executing tool: ${errMessage}`;
             isError = true;
+            console.error(
+              JSON.stringify({
+                at: 'auto_tool_execute_error',
+                provider: 'anthropic',
+                sessionId: session.id,
+                toolId: req.id,
+                name: req.name,
+                message: errMessage,
+              })
+            );
           }
 
-          const toolResultBlock = {
+          const toolResult: ToolResultBlock = {
             type: 'tool_result',
             tool_use_id: req.id,
             content: output,
-            is_error: isError,
+            is_error: isError
           };
-          aggregatedResults.push(toolResultBlock);
+          toolResultBlocks.push(toolResult);
 
-          // Emit UI event per tool for visibility
-          onMessage({
+          const autoSyntheticMessage: Message = {
+            id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+            type: 'message',
+            role: 'user',
+            content: [toolResult],
+            model: '',
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 0, output_tokens: 0 },
+          };
+          const autoToolMessage: ServerMessage = {
             type: 'agent:tool_output',
             sessionId: session.id,
             content: output,
-            message: {
-              id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-              type: 'message', role: 'user', content: [toolResultBlock],
-              model: '', stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 },
-            } as any,
-            toolOutput: { id: req.id, tool_use_id: req.id, name: req.name, output, isError, input: req.input },
-          });
+            message: autoSyntheticMessage,
+            toolOutput: {
+              id: req.id,
+              tool_use_id: req.id,
+              name: req.name,
+              output,
+              isError,
+              input: req.input,
+            },
+          };
+          onMessage(autoToolMessage);
         }
 
-        // Push a single user message containing ALL tool_result blocks
-        session.conversation.messages.push({ role: 'user', content: aggregatedResults as any });
-        await this.continueConversation(session, apiKey, onMessage);
-      }
+        const aggregatedToolMessage: MessageParam = { role: 'user', content: toolResultBlocks };
+        session.conversation.messages.push(aggregatedToolMessage);
+        session.conversation.updatedAt = new Date();
 
-    } catch (error: any) {
-      console.error(`[AnthropicService] Error continuing conversation:`, error);
-      
-      // Don't send error for token limit - it's already handled
-      if (!error.message?.includes('prompt is too long')) {
-        onMessage({
-          type: 'agent:error',
-          sessionId: session.id,
-          error: error.message
-        });
+        await this.runContinuation(session, apiKey, onMessage, 'auto');
       }
-    } finally {
-      session.currentStreamController = undefined;
+    } catch (error: unknown) {
+      console.error('[AnthropicService] Auto tool execution failed:', error);
+      const message = error instanceof Error ? error.message : 'Auto tool execution failed';
+      const errorMessage: ServerMessage = {
+        type: 'agent:error',
+        sessionId: session.id,
+        error: message,
+      };
+      onMessage(errorMessage);
     }
   }
 
@@ -679,6 +981,16 @@ export class AnthropicService {
    */
   stopStream(sessionId: string): void {
     const session = this.sessions.get(sessionId);
+    try {
+      console.log(
+        JSON.stringify({
+          at: 'anthropic_stop_stream',
+          provider: 'anthropic',
+          sessionId,
+          hasController: !!session?.currentStreamController
+        })
+      );
+    } catch {}
     if (session?.currentStreamController) {
       session.currentStreamController.abort();
       session.currentStreamController = undefined;
@@ -698,17 +1010,8 @@ export class AnthropicService {
   /**
    * List sessions (lightweight meta)
    */
-  listSessions(): Array<{
-    id: string;
-    title: string;
-    createdAt: Date;
-    lastActivity: Date;
-    messageCount: number;
-    workingDir: string;
-    maxMode: boolean;
-    phase: AgentSession['phase'];
-  }> {
-    const result: Array<any> = [];
+  listSessions(): SessionSummary[] {
+    const result: SessionSummary[] = [];
     for (const s of this.sessions.values()) {
       result.push({
         id: s.id,
@@ -727,7 +1030,7 @@ export class AnthropicService {
   /**
    * Get snapshot for a session
    */
-  getSnapshot(sessionId: string) {
+  getSnapshot(sessionId: string): SessionSnapshot | undefined {
     const s = this.sessions.get(sessionId);
     if (!s) return undefined;
     return {
@@ -742,6 +1045,7 @@ export class AnthropicService {
       pendingTools: s.pendingTools || [],
       conversation: { messages: s.conversation.messages },
       streamingState: s.streamingState,
+      activeTurn: s.activeTurn,
     };
   }
 
@@ -787,6 +1091,43 @@ export class AnthropicService {
     for (const sessionId of this.sessions.keys()) {
       this.clearSession(sessionId);
     }
+  }
+
+  /**
+   * Build a messages array for Anthropic by converting any persisted URL image sources
+   * (e.g., /agent/session/asset?id=...&file=...) back into base64 image sources.
+   */
+  private async materializeMessagesWithBase64(sessionId: string, messages: MessageParam[]): Promise<MessageParam[]> {
+    const out: MessageParam[] = [];
+    for (const m of messages) {
+      if (!m || !Array.isArray(m.content)) {
+        out.push(m);
+        continue;
+      }
+      const newBlocks: ContentBlock[] = [];
+      for (const b of m.content) {
+        if (b?.type === 'image' && b.source && typeof b.source === 'object') {
+          const src = b.source;
+          if (src.type === 'url' && typeof src.url === 'string') {
+            try {
+              const u = new URL(src.url, 'http://dummy');
+              const sid = u.searchParams.get('id') || sessionId;
+              const file = u.searchParams.get('file');
+              if (file) {
+                const loaded = await readSessionImageBase64(sid, file);
+                if (loaded) {
+                  newBlocks.push({ type: 'image', source: { type: 'base64', media_type: loaded.mediaType, data: loaded.base64 }, dimension: b.dimension ?? null });
+                  continue;
+                }
+              }
+            } catch {}
+          }
+        }
+        newBlocks.push(b);
+      }
+      out.push({ ...m, content: newBlocks });
+    }
+    return out;
   }
 }
 

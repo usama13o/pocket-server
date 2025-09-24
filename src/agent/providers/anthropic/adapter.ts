@@ -5,6 +5,16 @@ import type { ProviderAdapter } from '../../core/adapters';
 
 export class AnthropicAdapter implements ProviderAdapter {
   async send(message: any, apiKey: string, onMessage: (m: ServerMessage) => void): Promise<void> {
+    try {
+      console.log(
+        JSON.stringify({
+          at: 'provider_dispatch',
+          provider: 'anthropic',
+          sessionId: message?.sessionId,
+          type: message?.type
+        })
+      );
+    } catch {}
     switch (message.type) {
       case 'agent:message':
         await anthropicService.processMessage(message, apiKey, onMessage);
@@ -46,4 +56,3 @@ export class AnthropicAdapter implements ProviderAdapter {
     }
   }
 }
-

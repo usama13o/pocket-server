@@ -123,7 +123,7 @@ export function createPairingDisplay(pin: string, expiresInSec: number, lanUrls:
   ];
   
   if (isRemote) {
-    content.push(`${colors.brightRed}⚠️  Remote pairing disabled for security${colors.reset}`);
+    content.push(`${colors.brightCyan}🌐 Remote pairing mode: ${colors.reset}${colors.bright}use PIN + Token${colors.reset}`);
   } else if (lanUrls.length > 0) {
     content.push(`${colors.brightCyan}📱 Connect from these URLs:${colors.reset}`);
     lanUrls.forEach(url => {
@@ -158,7 +158,7 @@ ${colors.bright}COMMANDS:${colors.reset}
 
 ${colors.bright}FLAGS:${colors.reset}
   ${colors.brightYellow}--port, -p${colors.reset} ${colors.gray}<n>${colors.reset}   Port to listen on ${colors.dim}(default: 3000 or $PORT)${colors.reset}
-  ${colors.brightYellow}--remote, -r${colors.reset}        Start Cloudflare tunnel for remote access
+  ${colors.brightYellow}--remote, -r${colors.reset}        Start Cloudflare tunnel (start) or enable remote pairing (pair)
   ${colors.brightYellow}--no-auto-update${colors.reset}    Skip pre-start update check
   ${colors.brightYellow}--duration${colors.reset} ${colors.gray}<ms>${colors.reset}   Pairing window duration ${colors.dim}(pair only; default: 60000)${colors.reset}
   ${colors.brightYellow}--pin${colors.reset} ${colors.gray}<code>${colors.reset}        Override generated PIN ${colors.dim}(pair only)${colors.reset}
@@ -169,6 +169,7 @@ ${colors.bright}EXAMPLES:${colors.reset}
   ${colors.gray}$${colors.reset} ${colors.brightGreen}pocket-server start${colors.reset} ${colors.brightYellow}--port${colors.reset} ${colors.gray}3010${colors.reset}
   ${colors.gray}$${colors.reset} ${colors.brightGreen}pocket-server start${colors.reset} ${colors.brightYellow}-p=3010${colors.reset} ${colors.brightYellow}--remote${colors.reset}
   ${colors.gray}$${colors.reset} ${colors.brightGreen}pocket-server pair${colors.reset} ${colors.brightYellow}--duration${colors.reset} ${colors.gray}120000${colors.reset}
+  ${colors.gray}$${colors.reset} ${colors.brightGreen}pocket-server pair --remote${colors.reset}
   ${colors.gray}$${colors.reset} ${colors.brightGreen}pocket-server terminal sessions${colors.reset}
   ${colors.gray}$${colors.reset} ${colors.brightGreen}pocket-server terminal attach${colors.reset} ${colors.gray}--index 2${colors.reset}
   ${colors.gray}$${colors.reset} ${colors.brightGreen}pocket-server terminal attach${colors.reset} ${colors.gray}"Opencode"${colors.reset}

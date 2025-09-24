@@ -235,10 +235,13 @@ async function cmdPair(flags: Record<string, string | boolean>): Promise<void> {
     console.error(`Invalid port: ${flags.port}`);
     process.exit(2);
   }
+  // If user passes --remote here, we do not automatically start tunnel,
+  // but we will indicate remote pairing mode and print public URL if available.
+  const remotePair = Boolean(flags.remote);
   await startServer(port, false);
   const pinArg = typeof flags.pin === 'string' ? String(flags.pin) : undefined;
   const durationMs = typeof flags.duration === 'string' ? Math.max(10_000, Number(flags.duration)) : 60_000;
-  const { pin, expiresAt } = startPairingWindow(durationMs, pinArg);
+  const { pin, expiresAt, pairToken, mode } = startPairingWindow(durationMs, pinArg, remotePair);
   const nets = os.networkInterfaces();
   const urls: string[] = [];
   Object.values(nets).forEach(ifaces => {
@@ -251,7 +254,24 @@ async function cmdPair(flags: Record<string, string | boolean>): Promise<void> {
   const expiresInSec = Math.max(1, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
   const pub = getPublicBaseUrl();
   
-  console.log(`\n${createPairingDisplay(pin, expiresInSec, urls, !!pub)}\n`);
+  // Build pairing display with remote info if applicable
+  const baseDisplay = createPairingDisplay(pin, expiresInSec, urls, remotePair || !!pub);
+  const remoteLines: string[] = [];
+  if (remotePair) {
+    remoteLines.push('');
+    remoteLines.push('Remote pairing mode enabled:');
+    if (pub) {
+      remoteLines.push(`  Public URL: ${pub}`);
+    } else {
+      remoteLines.push(`  Public URL: (start with --remote to enable tunnel)`);
+    }
+    if (pairToken) {
+      remoteLines.push(`  Pairing Token: ${pairToken}`);
+    }
+    remoteLines.push('');
+    remoteLines.push('Use URL + PIN + Token in the mobile app to pair remotely.');
+  }
+  console.log(`\n${baseDisplay}${remoteLines.length ? '\n' + remoteLines.join('\n') : ''}\n`);
 }
 
 async function cmdStop(): Promise<void> {
