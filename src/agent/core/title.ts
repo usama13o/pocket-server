@@ -7,28 +7,40 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 export async function generateConversationTitle(userMessage: string, anthropicApiKey?: string): Promise<string> {
-  // Try Anthropic if a key is available
+  // Try Anthropic if a key is available (prefer mobile key, fallback to server env)
   const key = anthropicApiKey || process.env.ANTHROPIC_API_KEY;
   if (key) {
     try {
-      const anthropic = new Anthropic({ apiKey: key });
-      const response = await anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 20,
-        temperature: 0.7,
-        messages: [{
-          role: 'user',
-          content: `Generate a short title (max 3 words) for a conversation that starts with: "${userMessage}". Return only the title, no quotes or punctuation.`
-        }]
-      });
-      const content = response.content[0];
-      if (content?.type === 'text') {
-        const title = content.text.trim();
-        const words = title.split(' ').filter(Boolean);
-        return words.length > 3 ? words.slice(0, 3).join(' ') : (title || 'New Chat');
+      // Create abort controller for timeout
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => abortController.abort(), 1500);
+      
+      try {
+        const anthropic = new Anthropic({ apiKey: key });
+        const response = await anthropic.messages.create({
+          model: 'claude-sonnet-4-5',
+          max_tokens: 20,
+          temperature: 0.7,
+          messages: [{
+            role: 'user',
+            content: `Generate a short title (max 3 words) for a conversation that starts with: "${userMessage}". Return only the title, no quotes or punctuation.`
+          }]
+        }, {
+          signal: abortController.signal
+        });
+        clearTimeout(timeoutId);
+        
+        const content = response.content[0];
+        if (content?.type === 'text') {
+          const title = content.text.trim();
+          const words = title.split(' ').filter(Boolean);
+          return words.length > 3 ? words.slice(0, 3).join(' ') : (title || 'New Chat');
+        }
+      } finally {
+        clearTimeout(timeoutId);
       }
     } catch (err) {
-      // Fall through to heuristic
+      // Silently fall through to heuristic (includes timeout, auth errors, etc.)
     }
   }
   return generateFallbackTitle(userMessage);

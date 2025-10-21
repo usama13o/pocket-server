@@ -3,6 +3,9 @@ Pocket Server — Release Notes
 
 Highlights
 ----------
+- **Claude Sonnet 4.5 migration** with updated SDK (v0.67.0) and latest text editor tool
+- Enhanced title generation with timeout protection and graceful fallback
+- Extended stop reason types for better error handling (refusal, context window exceeded)
 - Remote pairing mode protected by one-time tokens and capped retry attempts
 - Session asset storage for user image uploads (disk-backed with token-gated retrieval)
 - Turn lifecycle telemetry (`agent:turn`) unified across Anthropic and OpenAI providers
@@ -11,6 +14,12 @@ Highlights
 
 New
 ---
+- **Claude Sonnet 4.5 migration**
+  - Upgraded `@anthropic-ai/sdk` from v0.59.0 to v0.67.0
+  - Migrated model from `claude-sonnet-4-20250514` to `claude-sonnet-4-5` across all chat endpoints
+  - Updated text editor tool from `text_editor_20250429` to `text_editor_20250728`
+  - Extended `StopReason` type to include `refusal` and `model_context_window_exceeded`
+  - Enhanced title generation with 1.5s timeout and automatic fallback to heuristic on errors
 - Remote pairing flow
   - `pocket-server pair --remote` opens a remote pairing window with PIN + one-time token
   - `/auth/pair` accepts `{ deviceId, pin, pairToken }` during remote windows and rejects other origins

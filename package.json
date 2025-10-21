@@ -15,7 +15,7 @@
     "node": ">=22.18.0"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.59.0",
+    "@anthropic-ai/sdk": "^0.67.0",
     "@hono/node-server": "^1.18.1",
     "@hono/node-ws": "^1.0.4",
     "@xterm/headless": "^5.5.0",

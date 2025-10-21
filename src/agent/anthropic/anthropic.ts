@@ -77,7 +77,7 @@ export class AnthropicService {
           updatedAt: now,
           messages: [],
           metadata: {
-            model: 'claude-sonnet-4-20250514',
+            model: 'claude-sonnet-4-5',
             totalTokens: 0
           },
           settings: {
@@ -271,7 +271,7 @@ export class AnthropicService {
 
       const anthropic = this.initClient(apiKey);
       const streamConfig = {
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-5',
         max_tokens: 4096,
         system: systemPrompt,
         messages: await this.materializeMessagesWithBase64(sessionId, session.conversation.messages),
@@ -717,7 +717,7 @@ export class AnthropicService {
       session.currentStreamController = new AbortController();
 
       const streamConfig = {
-        model: 'claude-sonnet-4-20250514',
+        model: 'claude-sonnet-4-5',
         max_tokens: 4096,
         system: systemPrompt,
         messages: await this.materializeMessagesWithBase64(session.id, session.conversation.messages),

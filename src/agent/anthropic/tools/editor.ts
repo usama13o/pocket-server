@@ -12,7 +12,7 @@ import type { CreateCommand, InsertCommand, StrReplaceCommand, TextEditorCommand
  * Text editor tool definition for Anthropic API
  */
 export const editorToolDefinition: TextEditorTool = {
-  type: 'text_editor_20250429',
+  type: 'text_editor_20250728',
   name: 'str_replace_based_edit_tool'
 };
 

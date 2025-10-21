@@ -21,7 +21,7 @@ export interface Message {
   usage: Usage;
 }
 
-export type StopReason = 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | 'pause_turn';
+export type StopReason = 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use' | 'pause_turn' | 'refusal' | 'model_context_window_exceeded';
 
 export interface Usage {
   input_tokens: number;
@@ -261,7 +261,7 @@ export interface UserLocation {
 
 // Text Editor Tool
 export interface TextEditorTool extends SpecialTool {
-  type: 'text_editor_20250429' | 'text_editor_20250124' | 'text_editor_20241022';
+  type: 'text_editor_20250728' | 'text_editor_20250429' | 'text_editor_20250124' | 'text_editor_20241022';
   name: 'str_replace_based_edit_tool';
 }
 
