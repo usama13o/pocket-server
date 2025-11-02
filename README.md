@@ -233,6 +233,26 @@ Project context (CLAUDE.md / AGENTS.md)
 - Monorepos: nested `AGENTS.md`/`CLAUDE.md` files are supported; the closest file wins.
 - See `docs/context-injection-patterns/agents-specification.md` for the AGENTS.md format and guidance.
 
+Building mobile clients
+-----------------------
+
+Complete documentation for building React Native mobile clients:
+
+- **[Mobile Client Documentation](./docs/mobile-client/)** – comprehensive guide for mobile developers
+  - [API Reference](./docs/mobile-client/API-REFERENCE.md) – complete REST and WebSocket API documentation
+  - [Getting Started](./docs/mobile-client/GETTING-STARTED.md) – step-by-step React Native implementation guide
+  - [Architecture](./docs/mobile-client/ARCHITECTURE.md) – design patterns and best practices
+  - [Code Examples](./docs/mobile-client/examples/) – production-ready TypeScript services
+  - [Type Definitions](./docs/mobile-client/types/api-types.ts) – TypeScript types matching server APIs
+
+The mobile client documentation includes:
+- Complete authentication flow (pairing, challenge-response, token management)
+- WebSocket protocol with message types and reconnection logic
+- All REST API endpoints with request/response examples
+- Terminal integration with xterm.js in WebView
+- Agent chat and file system operations
+- Security best practices and error handling
+
 Security notes
 --------------
 
