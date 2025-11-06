@@ -236,19 +236,38 @@ Project context (CLAUDE.md / AGENTS.md)
 Building mobile clients
 -----------------------
 
-Complete documentation for building React Native mobile clients:
+### 📱 Mobile App
 
-- **[Working Example App](./examples/react-native-client/)** – **NEW**: Complete, runnable React Native app
-  - Ready to use: `npm install && npm start`
-  - Features: Authentication, WebSocket, Terminal with xterm.js
-  - Perfect starting point or reference implementation
+The official React Native mobile application is in the **[mobile-app/](./mobile-app/)** directory.
 
-- **[Mobile Client Documentation](./docs/mobile-client/)** – comprehensive guide for mobile developers
-  - [API Reference](./docs/mobile-client/API-REFERENCE.md) – complete REST and WebSocket API documentation
-  - [Getting Started](./docs/mobile-client/GETTING-STARTED.md) – step-by-step React Native implementation guide
-  - [Architecture](./docs/mobile-client/ARCHITECTURE.md) – design patterns and best practices
-  - [Code Examples](./docs/mobile-client/examples/) – production-ready TypeScript services
-  - [Type Definitions](./docs/mobile-client/types/api-types.ts) – TypeScript types matching server APIs
+**Get started:**
+```bash
+cd mobile-app
+npm install
+npm start
+```
+
+Features:
+- ✅ Full authentication with PIN pairing
+- ✅ WebSocket connection with auto-reconnection
+- ✅ Terminal with xterm.js
+- ✅ Secure token storage
+- 🚧 Agent chat (coming soon)
+- 🚧 File browser (coming soon)
+
+See [mobile-app/README.md](./mobile-app/README.md) for complete setup and development guide.
+
+### 📚 Documentation
+
+Complete documentation for mobile developers:
+
+- **[Example App](./examples/react-native-client/)** – Reference implementation
+- **[Mobile Client Documentation](./docs/mobile-client/)** – Comprehensive guides
+  - [API Reference](./docs/mobile-client/API-REFERENCE.md) – REST and WebSocket API
+  - [Getting Started](./docs/mobile-client/GETTING-STARTED.md) – Step-by-step guide
+  - [Architecture](./docs/mobile-client/ARCHITECTURE.md) – Design patterns
+  - [Code Examples](./docs/mobile-client/examples/) – TypeScript services
+  - [Type Definitions](./docs/mobile-client/types/api-types.ts) – API types
 
 The mobile client documentation includes:
 - Complete authentication flow (pairing, challenge-response, token management)
