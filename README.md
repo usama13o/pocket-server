@@ -238,6 +238,11 @@ Building mobile clients
 
 Complete documentation for building React Native mobile clients:
 
+- **[Working Example App](./examples/react-native-client/)** – **NEW**: Complete, runnable React Native app
+  - Ready to use: `npm install && npm start`
+  - Features: Authentication, WebSocket, Terminal with xterm.js
+  - Perfect starting point or reference implementation
+
 - **[Mobile Client Documentation](./docs/mobile-client/)** – comprehensive guide for mobile developers
   - [API Reference](./docs/mobile-client/API-REFERENCE.md) – complete REST and WebSocket API documentation
   - [Getting Started](./docs/mobile-client/GETTING-STARTED.md) – step-by-step React Native implementation guide

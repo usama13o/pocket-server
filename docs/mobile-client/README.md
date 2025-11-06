@@ -2,6 +2,17 @@
 
 This directory contains comprehensive documentation and reference materials for building React Native mobile clients that connect to pocket-server.
 
+## 🎯 Working Example App
+
+**NEW**: A complete, working React Native example app is available at:  
+**[../../examples/react-native-client/](../../examples/react-native-client/)**
+
+✅ **Ready to run** - Just `npm install` and `npm start`  
+✅ **Complete features** - Authentication, WebSocket, Terminal  
+✅ **Production-ready code** - Copy and extend for your app
+
+See the [example README](../../examples/react-native-client/README.md) for setup instructions.
+
 ## 📚 Documentation
 
 ### Core Documentation
