@@ -233,6 +233,50 @@ Project context (CLAUDE.md / AGENTS.md)
 - Monorepos: nested `AGENTS.md`/`CLAUDE.md` files are supported; the closest file wins.
 - See `docs/context-injection-patterns/agents-specification.md` for the AGENTS.md format and guidance.
 
+Building mobile clients
+-----------------------
+
+### 📱 Mobile App
+
+The official React Native mobile application is in the **[mobile-app/](./mobile-app/)** directory.
+
+**Get started:**
+```bash
+cd mobile-app
+npm install
+npm start
+```
+
+Features:
+- ✅ Full authentication with PIN pairing
+- ✅ WebSocket connection with auto-reconnection
+- ✅ Terminal with xterm.js
+- ✅ Secure token storage
+- 🚧 Agent chat (coming soon)
+- 🚧 File browser (coming soon)
+
+See [mobile-app/README.md](./mobile-app/README.md) for complete setup and development guide.
+
+### 📚 Documentation
+
+Complete documentation for mobile developers:
+
+- **[Example App](./examples/react-native-client/)** – Reference implementation
+- **[Mobile Client Documentation](./docs/mobile-client/)** – Comprehensive guides
+  - [API Reference](./docs/mobile-client/API-REFERENCE.md) – REST and WebSocket API
+  - [Getting Started](./docs/mobile-client/GETTING-STARTED.md) – Step-by-step guide
+  - [Architecture](./docs/mobile-client/ARCHITECTURE.md) – Design patterns
+  - [Code Examples](./docs/mobile-client/examples/) – TypeScript services
+  - [Type Definitions](./docs/mobile-client/types/api-types.ts) – API types
+
+The mobile client documentation includes:
+- Complete authentication flow (pairing, challenge-response, token management)
+- WebSocket protocol with message types and reconnection logic
+- All REST API endpoints with request/response examples
+- Terminal integration with xterm.js in WebView
+- Agent chat and file system operations
+- Security best practices and error handling
+
 Security notes
 --------------
 
